@@ -246,7 +246,7 @@ def analyze_volume(ticker, start_date, end_date):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TW50100_PATH = os.path.join(BASE_DIR, "TW50100.xlsx")
 
-st.write("點擊下方按鈕開始自動載入名單並計算多空指標：")
+st.write("點擊下方按鈕開始分析台灣前150家個股狀況：")
 run_btn = st.button("🚀 開始分析", use_container_width=True)
 
 if run_btn:
