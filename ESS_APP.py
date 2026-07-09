@@ -255,7 +255,7 @@ def analyze_volume(ticker, start_date, end_date):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TW50100_PATH = os.path.join(BASE_DIR, "TW50100.xlsx")
 
-st.write("點擊下方按鈕開始自動載入名單並計算多空指標：")
+st.write("點擊下方按鈕開始自動分析台灣150成分股：")
 run_btn = st.button("🚀 開始分析", use_container_width=True)
 
 if run_btn:
@@ -337,11 +337,9 @@ if run_btn:
         df_sheet2, _ = format_sheet_data(A_call, B_call, f_ranks, t_ranks, name_to_ind)
         
         # 計算統計數據
-        # A 日期 (今天 vs 昨天)
         a_bull_total, a_bull_leave = get_stats(A_put, B_put)
         a_bear_total, a_bear_leave = get_stats(A_call, B_call)
         
-        # B 日期 (昨天 vs 前天)
         b_bull_total, b_bull_leave = get_stats(B_put, C_put)
         b_bear_total, b_bear_leave = get_stats(B_call, C_call)
 
@@ -371,28 +369,69 @@ if run_btn:
 
     st.divider()
 
-    # --- 2. 呈現統計數據儀表板 ---
+    # --- 2. 呈現統計數據儀表板 (表格 + 直條圖) ---
     st.header("📈 多空家數變化統計")
-    st.caption(f"以 {date_a} 為基準，與前一交易日 ({date_b}) 之數據落差")
+    st.caption(f"比較基準：今日 ({date_a}) vs 昨日 ({date_b})")
     
-    # 使用四個 metric 元件，增加 delta_color="inverse" 讓空頭增加顯示為紅色
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("🟢 多頭家數 (維持+新)", f"{a_bull_total} 家", f"{a_bull_total - b_bull_total} 家")
-    with col2:
-        # 多頭離開增加，通常視為偏空，所以用 inverse (紅色)
-        st.metric("📉 多頭離開家數", f"{a_bull_leave} 家", f"{a_bull_leave - b_bull_leave} 家", delta_color="inverse")
-    with col3:
-        # 空頭家數增加，視為偏空，所以用 inverse (紅色)
-        st.metric("🔴 空頭家數 (維持+新)", f"{a_bear_total} 家", f"{a_bear_total - b_bear_total} 家", delta_color="inverse")
-    with col4:
-        # 空頭離開增加，視為偏多，所以用預設 (綠色)
-        st.metric("📈 空頭離開家數", f"{a_bear_leave} 家", f"{a_bear_leave - b_bear_leave} 家")
+    # 準備數據表
+    stats_df = pd.DataFrame({
+        "統計指標": ["🟢 多頭家數 (維持+新)", "📉 多頭離開家數", "🔴 空頭家數 (維持+新)", "📈 空頭離開家數"],
+        f"今日 ({date_a})": [a_bull_total, a_bull_leave, a_bear_total, a_bear_leave],
+        f"昨日 ({date_b})": [b_bull_total, b_bull_leave, b_bear_total, b_bear_leave],
+        "差異變化": [a_bull_total - b_bull_total, a_bull_leave - b_bull_leave, a_bear_total - b_bear_total, a_bear_leave - b_bear_leave]
+    })
+
+    # 設定差異欄位的正負顏色 (使用 HTML span 達成紅綠字體效果)
+    def color_diff(val):
+        if val > 0:
+            return f'<span style="color: #ff4b4b; font-weight: bold;">+{val}</span>' # 紅色
+        elif val < 0:
+            return f'<span style="color: #09ab3b; font-weight: bold;">{val}</span>'  # 綠色
+        return f'<span style="color: gray;">{val}</span>'
+
+    # 套用 HTML 渲染
+    display_stats_df = stats_df.copy()
+    display_stats_df["差異變化"] = display_stats_df["差異變化"].apply(color_diff)
+    
+    col_table, col_chart = st.columns([1, 1.5])
+    
+    with col_table:
+        st.write("📊 **家數明細表**")
+        st.write(display_stats_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+        
+    with col_chart:
+        st.write("📊 **家數對比圖**")
+        # 準備繪圖資料 (將欄位轉置為長格式)
+        chart_data = pd.DataFrame({
+            "指標": ["1. 多頭(維持+新)", "2. 多頭(離開)", "3. 空頭(維持+新)", "4. 空頭(離開)"] * 2,
+            "日期": [f"1. 今日 ({date_a})"] * 4 + [f"2. 昨日 ({date_b})"] * 4,
+            "家數": [a_bull_total, a_bull_leave, a_bear_total, a_bear_leave, b_bull_total, b_bull_leave, b_bear_total, b_bear_leave]
+        })
+
+        # 使用 xOffset 製作群組直條圖
+        try:
+            bar_chart = alt.Chart(chart_data).mark_bar().encode(
+                x=alt.X('指標:N', title='', sort=["1. 多頭(維持+新)", "2. 多頭(離開)", "3. 空頭(維持+新)", "4. 空頭(離開)"], axis=alt.Axis(labelAngle=0)),
+                y=alt.Y('家數:Q', title='個股家數'),
+                color=alt.Color('日期:N', title='日期', scale=alt.Scale(range=['#FF4B4B', '#A0A6B1'])), # 今日紅、昨日灰
+                xOffset='日期:N',
+                tooltip=['指標', '日期', '家數']
+            ).properties(height=280)
+            st.altair_chart(bar_chart, use_container_width=True)
+        except Exception:
+            # 兼容較舊版本 Altair
+            bar_chart = alt.Chart(chart_data).mark_bar().encode(
+                x=alt.X('日期:N', title='', axis=alt.Axis(labels=False, ticks=False)),
+                y=alt.Y('家數:Q', title='個股家數'),
+                color=alt.Color('日期:N', scale=alt.Scale(range=['#FF4B4B', '#A0A6B1']), legend=alt.Legend(title="日期", orient='top')),
+                column=alt.Column('指標:N', title=None, header=alt.Header(labelOrient='bottom'))
+            ).properties(width=100, height=280)
+            st.altair_chart(bar_chart, use_container_width=False)
 
     st.divider()
 
     # --- 3. 呈現多頭分價量動態圖表 ---
-    st.header("📊 多頭個股 64 日分價量分析")
+    st.header("📈 多頭個股 64 日分價量分析")
     st.caption("僅計算「維持」與「新進」的多頭個股。點擊各股名稱展開圖表 (橘色為目前現價落點)。")
     
     if bullish_stocks:
