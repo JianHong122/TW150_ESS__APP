@@ -9,8 +9,8 @@ import os
 # ==========================================
 # 網頁基本設定
 # ==========================================
-st.set_page_config(page_title="台股多空與分價量分析", layout="wide")
-st.title("📈 台股多空與分價量分析系統")
+st.set_page_config(page_title="霸王鮮果汁", layout="wide")
+st.title("🍹 霸王鮮果汁")
 
 # ==========================================
 # 工具函式 (無檔案化處理)
@@ -105,7 +105,7 @@ def check_conditions(row):
     return 0
 
 def format_sheet_data(today_stocks, yest_stocks, f_ranks, t_ranks, ind_map):
-    """整理表格資料"""
+    """整理表格資料 (解決 PyArrow 欄位重複 KeyError)"""
     t_uniq = list(dict.fromkeys(today_stocks))
     y_uniq = list(dict.fromkeys(yest_stocks))
     
@@ -141,7 +141,12 @@ def format_sheet_data(today_stocks, yest_stocks, f_ranks, t_ranks, ind_map):
             row[8], row[9], row[10], row[11] = s, f_ranks.get(s, ""), t_ranks.get(s, ""), ind_map.get(s, "")
         data.append(row)
         
-    cols = ["維持個股", "外資排名", "投信排名", "產業類別", "新個股", "外資排名", "投信排名", "產業類別", "離開股", "外資排名", "投信排名", "產業類別"]
+    # 修改欄位名稱，確保每一個欄位名稱都是唯一的
+    cols = [
+        "維持個股", "外資(維持)", "投信(維持)", "產業(維持)", 
+        "新個股", "外資(新)", "投信(新)", "產業(新)", 
+        "離開股", "外資(離)", "投信(離)", "產業(離)"
+    ]
     return pd.DataFrame(data, columns=cols), maintained + new_stocks
 
 def analyze_volume(ticker, start_date, end_date):
@@ -210,56 +215,25 @@ def analyze_volume(ticker, start_date, end_date):
 # 定義檔案路徑 (對應 GitHub 專案根目錄)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TW50100_PATH = os.path.join(BASE_DIR, "TW50100.xlsx")
-FILE_XLSX_PATH = os.path.join(BASE_DIR, "FIle.xlsx")
 
-with st.sidebar:
-    st.header("⚙️ 系統控制")
-    st.info("💡 系統已自動綁定專案內的 TW50100.xlsx 與 FIle.xlsx，無須手動上傳。")
-    run_btn = st.button("🚀 開始今日分析", use_container_width=True)
+# 初始畫面，單純一個按鈕
+st.write("點擊下方按鈕開始自動載入名單並計算多空指標：")
+run_btn = st.button("🚀 開始分析", use_container_width=True)
 
 if run_btn:
-    # 檢查檔案是否存在於專案內
+    # 檢查核心檔案是否存在
     if not os.path.exists(TW50100_PATH):
         st.error(f"⚠️ 找不到 {TW50100_PATH}！請確保該檔案已上傳至 GitHub 專案中。")
         st.stop()
-    if not os.path.exists(FILE_XLSX_PATH):
-        st.error(f"⚠️ 找不到 {FILE_XLSX_PATH}！請確保該檔案已上傳至 GitHub 專案中。")
-        st.stop()
-
-    # --- 1. 呈現 FIle.xlsx 統計圖表 ---
-    st.header("📊 歷史數量走勢圖 (FIle.xlsx)")
-    try:
-        # 直接讀取專案路徑的檔案
-        df_file = pd.read_excel(FILE_XLSX_PATH, engine='openpyxl', header=None)
-        df_chart = df_file.iloc[1:101, 0:7].copy().dropna(how='all')
-        
-        if not df_chart.empty:
-            df_chart.columns = ['Date', 'Bull_Maint', 'Bull_New', 'Bull_Leave', 'Bear_Maint', 'Bear_New', 'Bear_Leave']
-            df_chart['Date'] = df_chart['Date'].astype(str).str.replace(r'DO_|.xlsx', '', regex=True)
-            df_chart.set_index('Date', inplace=True)
-            
-            col_chart1, col_chart2 = st.columns(2)
-            with col_chart1:
-                st.subheader("Chart 1: 多頭數量走勢")
-                st.line_chart(df_chart[['Bull_Maint', 'Bull_New', 'Bull_Leave']])
-            with col_chart2:
-                st.subheader("Chart 4: 空頭數量走勢")
-                st.line_chart(df_chart[['Bear_Maint', 'Bear_New', 'Bear_Leave']])
-        else:
-            st.info("FIle.xlsx 尚未有足夠的歷史資料可供繪圖。")
-    except Exception as e:
-        st.error(f"讀取 FIle.xlsx 發生錯誤: {e}")
 
     st.divider()
 
-    # --- 2. 爬取與計算多空名單 ---
+    # --- 爬取與計算多空名單 ---
     with st.spinner("正在背景抓取資料與計算技術指標，這可能需要幾分鐘..."):
         yest_date, today_date = get_trading_days()
         
-       # 直接讀取專案路徑的 TW50100 檔案
+        # 讀取專案路徑的 TW50100 檔案，動態抓取前三欄欄位名稱
         df_tw = pd.read_excel(TW50100_PATH, engine='openpyxl', dtype=str)
-        
-        # 動態抓取前三欄的欄位名稱 (避免 KeyError)
         col_tkr = df_tw.columns[0]
         col_name = df_tw.columns[1]
         col_ind = df_tw.columns[2] if len(df_tw.columns) > 2 else None
@@ -324,7 +298,7 @@ if run_btn:
         df_sheet1, bullish_stocks = format_sheet_data(A_put, B_put, f_ranks, t_ranks, name_to_ind)
         df_sheet2, _ = format_sheet_data(A_call, B_call, f_ranks, t_ranks, name_to_ind)
 
-    # --- 3. 呈現多空清單表格 ---
+    # --- 呈現多空清單表格 ---
     st.header(f"📋 今日個股多空清單 ({today_date})")
     
     tab1, tab2 = st.tabs(["🟢 多頭個股清單", "🔴 空頭個股清單"])
@@ -335,7 +309,7 @@ if run_btn:
 
     st.divider()
 
-    # --- 4. 呈現多頭分價量動態圖表 ---
+    # --- 呈現多頭分價量動態圖表 ---
     st.header("📊 多頭個股 64 日分價量分析")
     st.caption("僅計算「維持」與「新進」的多頭個股。點擊各股名稱展開圖表。")
     
