@@ -256,16 +256,29 @@ if run_btn:
     with st.spinner("正在背景抓取資料與計算技術指標，這可能需要幾分鐘..."):
         yest_date, today_date = get_trading_days()
         
-        # 直接讀取專案路徑的 TW50100 檔案
+       # 直接讀取專案路徑的 TW50100 檔案
         df_tw = pd.read_excel(TW50100_PATH, engine='openpyxl', dtype=str)
+        
+        # 動態抓取前三欄的欄位名稱 (避免 KeyError)
+        col_tkr = df_tw.columns[0]
+        col_name = df_tw.columns[1]
+        col_ind = df_tw.columns[2] if len(df_tw.columns) > 2 else None
+        
         name_to_ticker = {}
         name_to_ind = {}
+        
         for _, row in df_tw.iterrows():
-            if pd.notna(row[1]) and pd.notna(row[0]):
-                name, tkr = str(row[1]).strip(), str(row[0]).strip()
-                if tkr.endswith('.0'): tkr = tkr[:-2]
+            if pd.notna(row[col_name]) and pd.notna(row[col_tkr]):
+                name = str(row[col_name]).strip()
+                tkr = str(row[col_tkr]).strip()
+                if tkr.endswith('.0'): 
+                    tkr = tkr[:-2]
                 name_to_ticker[name] = tkr
-                name_to_ind[name] = str(row[2]).strip() if len(row)>2 else ""
+                
+                if col_ind and pd.notna(row[col_ind]):
+                    name_to_ind[name] = str(row[col_ind]).strip()
+                else:
+                    name_to_ind[name] = ""
         
         # 抓取法人資料
         f_ranks = fetch_twse_ranks(today_date, "TWT38U")
