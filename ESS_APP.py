@@ -18,14 +18,14 @@ st.title("🍹 霸王鮮果汁")
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_trading_days():
-    """自動偵測最近兩個台股交易日"""
+    """自動偵測最近三個台股交易日 (C:前天, B:昨天, A:今天)"""
     try:
         benchmark = yf.Ticker("0050.TW").history(period="15d")
         dates = benchmark.index.tz_localize(None).strftime('%Y%m%d').tolist()
-        return dates[-2], dates[-1]
+        return dates[-3], dates[-2], dates[-1]
     except Exception as e:
         st.error(f"取得交易日失敗: {e}")
-        return None, None
+        return None, None, None
 
 def fetch_twse_ranks(date_str, code):
     """記憶體內下載並解析 TWSE 法人買賣超資料"""
@@ -149,6 +149,18 @@ def format_sheet_data(today_stocks, yest_stocks, f_ranks, t_ranks, ind_map):
     ]
     return pd.DataFrame(data, columns=cols), maintained + new_stocks
 
+def get_stats(target_list, baseline_list):
+    """計算特定日期的家數統計資料 (Target vs Baseline)"""
+    target_set = set(target_list)
+    baseline_set = set(baseline_list)
+    
+    maintained = len(target_set.intersection(baseline_set))
+    new_stocks = len(target_set - baseline_set)
+    leave_stocks = len(baseline_set - target_set)
+    
+    total = maintained + new_stocks # 總家數 (維持+新)
+    return total, leave_stocks
+
 def style_dataframe(df):
     """為 DataFrame 加上根據法人排行設定的背景顏色"""
     def highlight_cells(row):
@@ -179,7 +191,7 @@ def analyze_volume(ticker, start_date, end_date):
         if hist.empty or len(hist) < 64: return None
         
         hist_64 = hist.tail(64).copy()
-        current_price = hist_64['Close'].iloc[-1] # 取得最新現價
+        current_price = hist_64['Close'].iloc[-1]
         
         max_p = hist_64['High'].max()
         min_p = hist_64['Low'].min()
@@ -187,11 +199,9 @@ def analyze_volume(ticker, start_date, end_date):
         
         bin_size = (max_p - min_p) / 20
         
-        # 計算現價落在哪一個 index 區間
         curr_idx = int((current_price - min_p) / bin_size)
-        curr_idx = max(0, min(19, curr_idx)) # 確保不超出 0~19 的範圍
+        curr_idx = max(0, min(19, curr_idx))
         
-        # 加上 is_current 布林值標記
         bins = [{'start': min_p + i * bin_size, 'end': min_p + (i + 1) * bin_size, 'vol': 0, 'is_current': i == curr_idx} for i in range(20)]
         
         for _, row in hist_64.iterrows():
@@ -234,7 +244,6 @@ def analyze_volume(ticker, start_date, end_date):
         df_bins = pd.DataFrame(bins)
         df_bins['label'] = df_bins.apply(lambda x: f"{x['start']:.2f}~{x['end']:.2f}", axis=1)
         
-        # 回傳圖表 dataframe 與 現價
         return df_bins[['label', 'vol', 'start', 'is_current']], current_price
     except:
         return None
@@ -246,7 +255,7 @@ def analyze_volume(ticker, start_date, end_date):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TW50100_PATH = os.path.join(BASE_DIR, "TW50100.xlsx")
 
-st.write("點擊下方按鈕開始分析台灣前150家個股狀況：")
+st.write("點擊下方按鈕開始自動載入名單並計算多空指標：")
 run_btn = st.button("🚀 開始分析", use_container_width=True)
 
 if run_btn:
@@ -256,8 +265,9 @@ if run_btn:
 
     st.divider()
 
-    with st.spinner("正在背景抓取資料與計算技術指標，這可能需要幾分鐘..."):
-        yest_date, today_date = get_trading_days()
+    with st.spinner("正在背景抓取近三日資料與計算技術指標，這可能需要幾分鐘..."):
+        # 取得 C(前天), B(昨天), A(今天)
+        date_c, date_b, date_a = get_trading_days()
         
         df_tw = pd.read_excel(TW50100_PATH, engine='openpyxl', dtype=str)
         col_tkr = df_tw.columns[0]
@@ -275,14 +285,17 @@ if run_btn:
                 name_to_ticker[name] = tkr
                 name_to_ind[name] = str(row[col_ind]).strip() if (col_ind and pd.notna(row[col_ind])) else ""
         
-        f_ranks = fetch_twse_ranks(today_date, "TWT38U")
-        t_ranks = fetch_twse_ranks(today_date, "TWT44U")
+        # 法人資料只需抓 A 日期用來顯示在表格
+        f_ranks = fetch_twse_ranks(date_a, "TWT38U")
+        t_ranks = fetch_twse_ranks(date_a, "TWT44U")
         
-        target_today = datetime.strptime(today_date, "%Y%m%d")
+        target_today = datetime.strptime(date_a, "%Y%m%d")
         start_date = (target_today - timedelta(days=150)).strftime("%Y-%m-%d")
         end_date = (target_today + timedelta(days=1)).strftime("%Y-%m-%d")
         
-        A_put, A_call, B_put, B_call = [], [], [], []
+        A_put, A_call = [], []
+        B_put, B_call = [], []
+        C_put, C_call = [], []
         
         progress_bar = st.progress(0)
         total_stocks = len(name_to_ticker)
@@ -296,29 +309,45 @@ if run_btn:
                     hist = calc_ta(hist)
                     hist['DateStr'] = hist.index.tz_localize(None).strftime('%Y%m%d')
                     
-                    r_today = hist[hist['DateStr'] == today_date]
-                    r_yest = hist[hist['DateStr'] == yest_date]
+                    r_a = hist[hist['DateStr'] == date_a]
+                    r_b = hist[hist['DateStr'] == date_b]
+                    r_c = hist[hist['DateStr'] == date_c]
                     
-                    if not r_today.empty:
-                        cond = check_conditions(r_today.iloc[0])
+                    if not r_a.empty:
+                        cond = check_conditions(r_a.iloc[0])
                         if cond == 1: A_put.append(name)
                         elif cond == -1: A_call.append(name)
                             
-                    if not r_yest.empty:
-                        cond = check_conditions(r_yest.iloc[0])
+                    if not r_b.empty:
+                        cond = check_conditions(r_b.iloc[0])
                         if cond == 1: B_put.append(name)
                         elif cond == -1: B_call.append(name)
+                        
+                    if not r_c.empty:
+                        cond = check_conditions(r_c.iloc[0])
+                        if cond == 1: C_put.append(name)
+                        elif cond == -1: C_call.append(name)
             except: pass
             progress_bar.progress((idx + 1) / total_stocks)
             
         progress_bar.empty()
         
+        # 組合 A 日期的表格 (A vs B)
         df_sheet1, bullish_stocks = format_sheet_data(A_put, B_put, f_ranks, t_ranks, name_to_ind)
         df_sheet2, _ = format_sheet_data(A_call, B_call, f_ranks, t_ranks, name_to_ind)
+        
+        # 計算統計數據
+        # A 日期 (今天 vs 昨天)
+        a_bull_total, a_bull_leave = get_stats(A_put, B_put)
+        a_bear_total, a_bear_leave = get_stats(A_call, B_call)
+        
+        # B 日期 (昨天 vs 前天)
+        b_bull_total, b_bull_leave = get_stats(B_put, C_put)
+        b_bear_total, b_bear_leave = get_stats(B_call, C_call)
 
-    st.header(f"📋 今日個股多空清單 ({today_date})")
+    # --- 1. 呈現多空清單表格 ---
+    st.header(f"📋 今日個股多空清單 ({date_a})")
     
-    # 透過 column_config 覆寫前台抬頭
     display_config = {
         "外資(維持)": st.column_config.Column("外資排行"),
         "投信(維持)": st.column_config.Column("投信排行"),
@@ -328,7 +357,6 @@ if run_btn:
         "投信(離)": st.column_config.Column("投信排行")
     }
 
-    # 計算動態表格高度 (每行約 35px，表頭約 40px，上下限 150px ~ 800px)
     height_sheet1 = min(max(150, len(df_sheet1) * 35 + 43), 800)
     height_sheet2 = min(max(150, len(df_sheet2) * 35 + 43), 800)
 
@@ -343,11 +371,32 @@ if run_btn:
 
     st.divider()
 
+    # --- 2. 呈現統計數據儀表板 ---
+    st.header("📈 多空家數變化統計")
+    st.caption(f"以 {date_a} 為基準，與前一交易日 ({date_b}) 之數據落差")
+    
+    # 使用四個 metric 元件，增加 delta_color="inverse" 讓空頭增加顯示為紅色
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("🟢 多頭家數 (維持+新)", f"{a_bull_total} 家", f"{a_bull_total - b_bull_total} 家")
+    with col2:
+        # 多頭離開增加，通常視為偏空，所以用 inverse (紅色)
+        st.metric("📉 多頭離開家數", f"{a_bull_leave} 家", f"{a_bull_leave - b_bull_leave} 家", delta_color="inverse")
+    with col3:
+        # 空頭家數增加，視為偏空，所以用 inverse (紅色)
+        st.metric("🔴 空頭家數 (維持+新)", f"{a_bear_total} 家", f"{a_bear_total - b_bear_total} 家", delta_color="inverse")
+    with col4:
+        # 空頭離開增加，視為偏多，所以用預設 (綠色)
+        st.metric("📈 空頭離開家數", f"{a_bear_leave} 家", f"{a_bear_leave - b_bear_leave} 家")
+
+    st.divider()
+
+    # --- 3. 呈現多頭分價量動態圖表 ---
     st.header("📊 多頭個股 64 日分價量分析")
-    st.caption("僅計算「維持」與「新進」的多頭個股。點擊各股名稱展開圖表。")
+    st.caption("僅計算「維持」與「新進」的多頭個股。點擊各股名稱展開圖表 (橘色為目前現價落點)。")
     
     if bullish_stocks:
-        target_today = datetime.strptime(today_date, "%Y%m%d")
+        target_today = datetime.strptime(date_a, "%Y%m%d")
         v_start = (target_today - timedelta(days=150)).strftime("%Y-%m-%d")
         v_end = (target_today + timedelta(days=1)).strftime("%Y-%m-%d")
         
@@ -358,10 +407,8 @@ if run_btn:
             result = analyze_volume(tkr, v_start, v_end)
             if result is not None:
                 df_vol, current_price = result
-                # 標籤加上現價資訊
                 with st.expander(f"🔹 {stock_name} ({tkr}) - 分價量圖表 / 現價 : {current_price:.2f}"):
                     
-                    # Altair 條件上色 (如果 is_current 為 True 標橘色，否則維持預設鋼鐵藍)
                     color_condition = alt.condition(
                         alt.datum.is_current == True,
                         alt.value('orange'),
