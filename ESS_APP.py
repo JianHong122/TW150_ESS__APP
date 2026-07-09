@@ -17,12 +17,34 @@ st.title("🍹 霸王鮮果汁")
 # 工具函式 (無檔案化處理)
 # ==========================================
 @st.cache_data(ttl=3600)
-def get_trading_days():
-    """自動偵測最近三個台股交易日 (C:前天, B:昨天, A:今天)"""
+def get_trading_days(target_date_str=None):
+    """
+    自動偵測台股交易日 (C:前天, B:昨天, A:今天)
+    如果有傳入 target_date_str (YYYY/MM/DD)，則尋找該日期(含)以前的最近三天。
+    """
     try:
-        benchmark = yf.Ticker("0050.TW").history(period="15d")
-        dates = benchmark.index.tz_localize(None).strftime('%Y%m%d').tolist()
-        return dates[-3], dates[-2], dates[-1]
+        if not target_date_str:
+            # 沒指定日期，直接抓最近 15 天的資料來取最後三天
+            benchmark = yf.Ticker("0050.TW").history(period="15d")
+            valid_dates = benchmark.index.tz_localize(None)
+        else:
+            # 有指定日期，往前抓取約一個半月的資料來確保能篩選出三天
+            target_dt = datetime.strptime(target_date_str, "%Y/%m/%d")
+            start_dt = target_dt - timedelta(days=45)
+            end_dt = target_dt + timedelta(days=1) # yfinance 的 end 是不包含的，所以加一天
+            
+            benchmark = yf.Ticker("0050.TW").history(start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
+            all_dates = benchmark.index.tz_localize(None)
+            
+            # 過濾出小於等於目標日期的交易日
+            valid_dates = all_dates[all_dates <= target_dt]
+
+        if len(valid_dates) < 3:
+            return None, None, None
+            
+        dates_str = valid_dates.strftime('%Y%m%d').tolist()
+        return dates_str[-3], dates_str[-2], dates_str[-1]
+        
     except Exception as e:
         st.error(f"取得交易日失敗: {e}")
         return None, None, None
@@ -158,14 +180,13 @@ def get_stats(target_list, baseline_list):
     new_stocks = len(target_set - baseline_set)
     leave_stocks = len(baseline_set - target_set)
     
-    total = maintained + new_stocks # 總家數 (維持+新)
+    total = maintained + new_stocks 
     return total, leave_stocks
 
 def style_dataframe(df):
     """為 DataFrame 加上根據法人排行設定的背景顏色"""
     def highlight_cells(row):
         styles = [''] * len(row)
-        
         def get_color(f, t):
             try:
                 fv, tv = float(f), float(t)
@@ -177,7 +198,6 @@ def style_dataframe(df):
         styles[0] = get_color(row.iloc[1], row.iloc[2])
         styles[4] = get_color(row.iloc[5], row.iloc[6])
         styles[8] = get_color(row.iloc[9], row.iloc[10])
-        
         return styles
         
     return df.style.apply(highlight_cells, axis=1)
@@ -198,7 +218,6 @@ def analyze_volume(ticker, start_date, end_date):
         if max_p == min_p: max_p, min_p = min_p * 1.05, min_p * 0.95
         
         bin_size = (max_p - min_p) / 20
-        
         curr_idx = int((current_price - min_p) / bin_size)
         curr_idx = max(0, min(19, curr_idx))
         
@@ -255,20 +274,51 @@ def analyze_volume(ticker, start_date, end_date):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TW50100_PATH = os.path.join(BASE_DIR, "TW50100.xlsx")
 
-st.write("點擊下方按鈕開始自動分析台灣150成分股：")
-run_btn = st.button("🚀 開始分析", use_container_width=True)
+# 抓取預設的最新交易日來填入輸入框
+default_c, default_b, default_a = get_trading_days()
+default_date_str = ""
+if default_a:
+    default_date_str = datetime.strptime(default_a, "%Y%m%d").strftime("%Y/%m/%d")
+
+# 新增文字輸入欄位
+col_input, col_btn = st.columns([2, 1], vertical_alignment="bottom")
+with col_input:
+    input_date = st.text_input("輸入查詢日期 (格式: YYYY/MM/DD)，留白則使用最新交易日", value=default_date_str)
+with col_btn:
+    run_btn = st.button("🚀 開始分析台灣150成分股", use_container_width=True)
 
 if run_btn:
     if not os.path.exists(TW50100_PATH):
         st.error(f"⚠️ 找不到 {TW50100_PATH}！請確保該檔案已上傳至 GitHub 專案中。")
         st.stop()
+        
+    # --- 防呆處理與日期判定 ---
+    target_date = input_date.strip()
+    if not target_date:
+        target_date = default_date_str
+    else:
+        try:
+            # 檢查輸入的格式是否正確
+            datetime.strptime(target_date, "%Y/%m/%d")
+        except ValueError:
+            st.error("⚠️ 日期格式錯誤！請依照「西元年/月/日」格式輸入，例如：2026/07/09")
+            st.stop()
 
     st.divider()
 
-    with st.spinner("正在背景抓取近三日資料與計算技術指標，這可能需要幾分鐘..."):
-        # 取得 C(前天), B(昨天), A(今天)
-        date_c, date_b, date_a = get_trading_days()
+    with st.spinner(f"正在尋找 {target_date} 附近的交易日與抓取資料..."):
+        # 取得目標日期的 C(前天), B(昨天), A(今天)
+        date_c, date_b, date_a = get_trading_days(target_date)
         
+        if date_a is None:
+            st.error("❌ 無法取得該日期附近的交易資料，請嘗試更換日期。")
+            st.stop()
+            
+        # 檢查取得的 A 日期是否與使用者輸入的日期不同 (代表假日或無開盤)
+        actual_date_a = datetime.strptime(date_a, "%Y%m%d").strftime("%Y/%m/%d")
+        if actual_date_a != target_date:
+            st.info(f"💡 提示：{target_date} 查無收盤資料，已自動往前推進至最近交易日：{actual_date_a}")
+
         df_tw = pd.read_excel(TW50100_PATH, engine='openpyxl', dtype=str)
         col_tkr = df_tw.columns[0]
         col_name = df_tw.columns[1]
@@ -285,7 +335,6 @@ if run_btn:
                 name_to_ticker[name] = tkr
                 name_to_ind[name] = str(row[col_ind]).strip() if (col_ind and pd.notna(row[col_ind])) else ""
         
-        # 法人資料只需抓 A 日期用來顯示在表格
         f_ranks = fetch_twse_ranks(date_a, "TWT38U")
         t_ranks = fetch_twse_ranks(date_a, "TWT44U")
         
@@ -332,11 +381,9 @@ if run_btn:
             
         progress_bar.empty()
         
-        # 組合 A 日期的表格 (A vs B)
         df_sheet1, bullish_stocks = format_sheet_data(A_put, B_put, f_ranks, t_ranks, name_to_ind)
         df_sheet2, _ = format_sheet_data(A_call, B_call, f_ranks, t_ranks, name_to_ind)
         
-        # 計算統計數據
         a_bull_total, a_bull_leave = get_stats(A_put, B_put)
         a_bear_total, a_bear_leave = get_stats(A_call, B_call)
         
@@ -344,7 +391,7 @@ if run_btn:
         b_bear_total, b_bear_leave = get_stats(B_call, C_call)
 
     # --- 1. 呈現多空清單表格 ---
-    st.header(f"📋 今日個股多空清單 ({date_a})")
+    st.header(f"📋 查詢日個股多空清單 ({date_a})")
     
     display_config = {
         "外資(維持)": st.column_config.Column("外資排行"),
@@ -371,25 +418,22 @@ if run_btn:
 
     # --- 2. 呈現統計數據儀表板 (表格 + 直條圖) ---
     st.header("📈 多空家數變化統計")
-    st.caption(f"比較基準：今日 ({date_a}) vs 昨日 ({date_b})")
+    st.caption(f"比較基準：基準日 ({date_a}) vs 前一日 ({date_b})")
     
-    # 準備數據表
     stats_df = pd.DataFrame({
         "統計指標": ["🟢 多頭家數 (維持+新)", "📉 多頭離開家數", "🔴 空頭家數 (維持+新)", "📈 空頭離開家數"],
-        f"今日 ({date_a})": [a_bull_total, a_bull_leave, a_bear_total, a_bear_leave],
-        f"昨日 ({date_b})": [b_bull_total, b_bull_leave, b_bear_total, b_bear_leave],
+        f"基準日 ({date_a})": [a_bull_total, a_bull_leave, a_bear_total, a_bear_leave],
+        f"前一日 ({date_b})": [b_bull_total, b_bull_leave, b_bear_total, b_bear_leave],
         "差異變化": [a_bull_total - b_bull_total, a_bull_leave - b_bull_leave, a_bear_total - b_bear_total, a_bear_leave - b_bear_leave]
     })
 
-    # 設定差異欄位的正負顏色 (使用 HTML span 達成紅綠字體效果)
     def color_diff(val):
         if val > 0:
-            return f'<span style="color: #ff4b4b; font-weight: bold;">+{val}</span>' # 紅色
+            return f'<span style="color: #ff4b4b; font-weight: bold;">+{val}</span>' 
         elif val < 0:
-            return f'<span style="color: #09ab3b; font-weight: bold;">{val}</span>'  # 綠色
+            return f'<span style="color: #09ab3b; font-weight: bold;">{val}</span>'  
         return f'<span style="color: gray;">{val}</span>'
 
-    # 套用 HTML 渲染
     display_stats_df = stats_df.copy()
     display_stats_df["差異變化"] = display_stats_df["差異變化"].apply(color_diff)
     
@@ -401,25 +445,22 @@ if run_btn:
         
     with col_chart:
         st.write("📊 **家數對比圖**")
-        # 準備繪圖資料 (將欄位轉置為長格式)
         chart_data = pd.DataFrame({
             "指標": ["1. 多頭(維持+新)", "2. 多頭(離開)", "3. 空頭(維持+新)", "4. 空頭(離開)"] * 2,
-            "日期": [f"1. 今日 ({date_a})"] * 4 + [f"2. 昨日 ({date_b})"] * 4,
+            "日期": [f"1. 基準日 ({date_a})"] * 4 + [f"2. 前一日 ({date_b})"] * 4,
             "家數": [a_bull_total, a_bull_leave, a_bear_total, a_bear_leave, b_bull_total, b_bull_leave, b_bear_total, b_bear_leave]
         })
 
-        # 使用 xOffset 製作群組直條圖
         try:
             bar_chart = alt.Chart(chart_data).mark_bar().encode(
                 x=alt.X('指標:N', title='', sort=["1. 多頭(維持+新)", "2. 多頭(離開)", "3. 空頭(維持+新)", "4. 空頭(離開)"], axis=alt.Axis(labelAngle=0)),
                 y=alt.Y('家數:Q', title='個股家數'),
-                color=alt.Color('日期:N', title='日期', scale=alt.Scale(range=['#FF4B4B', '#A0A6B1'])), # 今日紅、昨日灰
+                color=alt.Color('日期:N', title='日期', scale=alt.Scale(range=['#FF4B4B', '#A0A6B1'])), 
                 xOffset='日期:N',
                 tooltip=['指標', '日期', '家數']
             ).properties(height=280)
             st.altair_chart(bar_chart, use_container_width=True)
         except Exception:
-            # 兼容較舊版本 Altair
             bar_chart = alt.Chart(chart_data).mark_bar().encode(
                 x=alt.X('日期:N', title='', axis=alt.Axis(labels=False, ticks=False)),
                 y=alt.Y('家數:Q', title='個股家數'),
@@ -466,4 +507,4 @@ if run_btn:
                 with st.expander(f"🔹 {stock_name} ({tkr}) - 分價量圖表"):
                     st.write("查無有效的分價量資料。")
     else:
-        st.info("今日無多頭個股需計算分價量。")
+        st.info("該查詢日無多頭個股需計算分價量。")
