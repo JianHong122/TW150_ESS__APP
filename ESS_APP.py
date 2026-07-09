@@ -5,7 +5,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import io
 import os
-import altair as alt # 新增：用來繪製高階的橫向分價量圖
+import altair as alt
 
 # ==========================================
 # 網頁基本設定
@@ -162,8 +162,6 @@ def style_dataframe(df):
             except: pass
             return ''
             
-        # row index 對應: [0]維持個股, [4]新個股, [8]離開股
-        # f(外資) / t(投信) 對應的 index 分別是: 1/2, 5/6, 9/10
         styles[0] = get_color(row.iloc[1], row.iloc[2])
         styles[4] = get_color(row.iloc[5], row.iloc[6])
         styles[8] = get_color(row.iloc[9], row.iloc[10])
@@ -173,7 +171,7 @@ def style_dataframe(df):
     return df.style.apply(highlight_cells, axis=1)
 
 def analyze_volume(ticker, start_date, end_date):
-    """計算單一個股的 64 日分價量資料，返回包含 start 欄位的 DataFrame 以供排序"""
+    """計算單一個股的 64 日分價量資料，並回傳現價與標記當前價格區間"""
     try:
         hist = yf.Ticker(f"{ticker}.TW").history(start=start_date, end=end_date)
         if hist.empty:
@@ -181,12 +179,20 @@ def analyze_volume(ticker, start_date, end_date):
         if hist.empty or len(hist) < 64: return None
         
         hist_64 = hist.tail(64).copy()
+        current_price = hist_64['Close'].iloc[-1] # 取得最新現價
+        
         max_p = hist_64['High'].max()
         min_p = hist_64['Low'].min()
         if max_p == min_p: max_p, min_p = min_p * 1.05, min_p * 0.95
         
         bin_size = (max_p - min_p) / 20
-        bins = [{'start': min_p + i * bin_size, 'end': min_p + (i + 1) * bin_size, 'vol': 0} for i in range(20)]
+        
+        # 計算現價落在哪一個 index 區間
+        curr_idx = int((current_price - min_p) / bin_size)
+        curr_idx = max(0, min(19, curr_idx)) # 確保不超出 0~19 的範圍
+        
+        # 加上 is_current 布林值標記
+        bins = [{'start': min_p + i * bin_size, 'end': min_p + (i + 1) * bin_size, 'vol': 0, 'is_current': i == curr_idx} for i in range(20)]
         
         for _, row in hist_64.iterrows():
             if pd.isna(row['Volume']) or row['Volume'] <= 0: continue
@@ -227,8 +233,9 @@ def analyze_volume(ticker, start_date, end_date):
                     
         df_bins = pd.DataFrame(bins)
         df_bins['label'] = df_bins.apply(lambda x: f"{x['start']:.2f}~{x['end']:.2f}", axis=1)
-        # 把 start 傳回去，這樣 Altair 畫圖時才能按照價格高低排序 Y 軸
-        return df_bins[['label', 'vol', 'start']]
+        
+        # 回傳圖表 dataframe 與 現價
+        return df_bins[['label', 'vol', 'start', 'is_current']], current_price
     except:
         return None
 
@@ -311,7 +318,7 @@ if run_btn:
 
     st.header(f"📋 今日個股多空清單 ({today_date})")
     
-    # 透過 column_config 把前台的抬頭覆寫成統一名稱 (避開後端不能同名的限制)
+    # 透過 column_config 覆寫前台抬頭
     display_config = {
         "外資(維持)": st.column_config.Column("外資排行"),
         "投信(維持)": st.column_config.Column("投信排行"),
@@ -321,14 +328,18 @@ if run_btn:
         "投信(離)": st.column_config.Column("投信排行")
     }
 
+    # 計算動態表格高度 (每行約 35px，表頭約 40px，上下限 150px ~ 800px)
+    height_sheet1 = min(max(150, len(df_sheet1) * 35 + 43), 800)
+    height_sheet2 = min(max(150, len(df_sheet2) * 35 + 43), 800)
+
     tab1, tab2 = st.tabs(["🟢 多頭個股清單", "🔴 空頭個股清單"])
     
     with tab1:
         styled_df1 = style_dataframe(df_sheet1)
-        st.dataframe(styled_df1, use_container_width=True, hide_index=True, column_config=display_config, height=600)
+        st.dataframe(styled_df1, use_container_width=True, hide_index=True, column_config=display_config, height=height_sheet1)
     with tab2:
         styled_df2 = style_dataframe(df_sheet2)
-        st.dataframe(styled_df2, use_container_width=True, hide_index=True, column_config=display_config, height=600)
+        st.dataframe(styled_df2, use_container_width=True, hide_index=True, column_config=display_config, height=height_sheet2)
 
     st.divider()
 
@@ -344,18 +355,29 @@ if run_btn:
             tkr = name_to_ticker.get(stock_name)
             if not tkr: continue
             
-            with st.expander(f"🔹 {stock_name} ({tkr}) - 分價量圖表"):
-                df_vol = analyze_volume(tkr, v_start, v_end)
-                if df_vol is not None and not df_vol.empty:
-                    # 使用 Altair 繪製橫向直條圖，並依照價格區間 (start) 降冪排序，實現高價在上方
+            result = analyze_volume(tkr, v_start, v_end)
+            if result is not None:
+                df_vol, current_price = result
+                # 標籤加上現價資訊
+                with st.expander(f"🔹 {stock_name} ({tkr}) - 分價量圖表 / 現價 : {current_price:.2f}"):
+                    
+                    # Altair 條件上色 (如果 is_current 為 True 標橘色，否則維持預設鋼鐵藍)
+                    color_condition = alt.condition(
+                        alt.datum.is_current == True,
+                        alt.value('orange'),
+                        alt.value('steelblue')
+                    )
+
                     chart = alt.Chart(df_vol).mark_bar(orient='horizontal').encode(
                         x=alt.X('vol:Q', title='累積成交量 (股)'),
                         y=alt.Y('label:N', title='價格區間 (TWD)', sort=alt.SortField(field='start', order='descending')),
+                        color=color_condition,
                         tooltip=['label', 'vol']
                     ).properties(height=350)
                     
                     st.altair_chart(chart, use_container_width=True)
-                else:
+            else:
+                with st.expander(f"🔹 {stock_name} ({tkr}) - 分價量圖表"):
                     st.write("查無有效的分價量資料。")
     else:
         st.info("今日無多頭個股需計算分價量。")
