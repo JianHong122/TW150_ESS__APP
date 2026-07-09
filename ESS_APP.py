@@ -5,6 +5,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import io
 import os
+import altair as alt # 新增：用來繪製高階的橫向分價量圖
 
 # ==========================================
 # 網頁基本設定
@@ -105,7 +106,7 @@ def check_conditions(row):
     return 0
 
 def format_sheet_data(today_stocks, yest_stocks, f_ranks, t_ranks, ind_map):
-    """整理表格資料 (解決 PyArrow 欄位重複 KeyError)"""
+    """整理表格資料，保持唯一欄位名稱"""
     t_uniq = list(dict.fromkeys(today_stocks))
     y_uniq = list(dict.fromkeys(yest_stocks))
     
@@ -141,7 +142,6 @@ def format_sheet_data(today_stocks, yest_stocks, f_ranks, t_ranks, ind_map):
             row[8], row[9], row[10], row[11] = s, f_ranks.get(s, ""), t_ranks.get(s, ""), ind_map.get(s, "")
         data.append(row)
         
-    # 修改欄位名稱，確保每一個欄位名稱都是唯一的
     cols = [
         "維持個股", "外資(維持)", "投信(維持)", "產業(維持)", 
         "新個股", "外資(新)", "投信(新)", "產業(新)", 
@@ -149,8 +149,31 @@ def format_sheet_data(today_stocks, yest_stocks, f_ranks, t_ranks, ind_map):
     ]
     return pd.DataFrame(data, columns=cols), maintained + new_stocks
 
+def style_dataframe(df):
+    """為 DataFrame 加上根據法人排行設定的背景顏色"""
+    def highlight_cells(row):
+        styles = [''] * len(row)
+        
+        def get_color(f, t):
+            try:
+                fv, tv = float(f), float(t)
+                if fv > 0 and tv > 0: return 'background-color: #FFFF99; color: #000000;'
+                if fv < 0 and tv < 0: return 'background-color: #CCFFCC; color: #000000;'
+            except: pass
+            return ''
+            
+        # row index 對應: [0]維持個股, [4]新個股, [8]離開股
+        # f(外資) / t(投信) 對應的 index 分別是: 1/2, 5/6, 9/10
+        styles[0] = get_color(row.iloc[1], row.iloc[2])
+        styles[4] = get_color(row.iloc[5], row.iloc[6])
+        styles[8] = get_color(row.iloc[9], row.iloc[10])
+        
+        return styles
+        
+    return df.style.apply(highlight_cells, axis=1)
+
 def analyze_volume(ticker, start_date, end_date):
-    """計算單一個股的 64 日分價量資料"""
+    """計算單一個股的 64 日分價量資料，返回包含 start 欄位的 DataFrame 以供排序"""
     try:
         hist = yf.Ticker(f"{ticker}.TW").history(start=start_date, end=end_date)
         if hist.empty:
@@ -204,7 +227,8 @@ def analyze_volume(ticker, start_date, end_date):
                     
         df_bins = pd.DataFrame(bins)
         df_bins['label'] = df_bins.apply(lambda x: f"{x['start']:.2f}~{x['end']:.2f}", axis=1)
-        return df_bins[['label', 'vol']].set_index('label')
+        # 把 start 傳回去，這樣 Altair 畫圖時才能按照價格高低排序 Y 軸
+        return df_bins[['label', 'vol', 'start']]
     except:
         return None
 
@@ -212,27 +236,22 @@ def analyze_volume(ticker, start_date, end_date):
 # 介面渲染與主程式
 # ==========================================
 
-# 定義檔案路徑 (對應 GitHub 專案根目錄)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TW50100_PATH = os.path.join(BASE_DIR, "TW50100.xlsx")
 
-# 初始畫面，單純一個按鈕
 st.write("點擊下方按鈕開始自動載入名單並計算多空指標：")
 run_btn = st.button("🚀 開始分析", use_container_width=True)
 
 if run_btn:
-    # 檢查核心檔案是否存在
     if not os.path.exists(TW50100_PATH):
         st.error(f"⚠️ 找不到 {TW50100_PATH}！請確保該檔案已上傳至 GitHub 專案中。")
         st.stop()
 
     st.divider()
 
-    # --- 爬取與計算多空名單 ---
     with st.spinner("正在背景抓取資料與計算技術指標，這可能需要幾分鐘..."):
         yest_date, today_date = get_trading_days()
         
-        # 讀取專案路徑的 TW50100 檔案，動態抓取前三欄欄位名稱
         df_tw = pd.read_excel(TW50100_PATH, engine='openpyxl', dtype=str)
         col_tkr = df_tw.columns[0]
         col_name = df_tw.columns[1]
@@ -245,20 +264,13 @@ if run_btn:
             if pd.notna(row[col_name]) and pd.notna(row[col_tkr]):
                 name = str(row[col_name]).strip()
                 tkr = str(row[col_tkr]).strip()
-                if tkr.endswith('.0'): 
-                    tkr = tkr[:-2]
+                if tkr.endswith('.0'): tkr = tkr[:-2]
                 name_to_ticker[name] = tkr
-                
-                if col_ind and pd.notna(row[col_ind]):
-                    name_to_ind[name] = str(row[col_ind]).strip()
-                else:
-                    name_to_ind[name] = ""
+                name_to_ind[name] = str(row[col_ind]).strip() if (col_ind and pd.notna(row[col_ind])) else ""
         
-        # 抓取法人資料
         f_ranks = fetch_twse_ranks(today_date, "TWT38U")
         t_ranks = fetch_twse_ranks(today_date, "TWT44U")
         
-        # 運算 150 檔個股多空
         target_today = datetime.strptime(today_date, "%Y%m%d")
         start_date = (target_today - timedelta(days=150)).strftime("%Y-%m-%d")
         end_date = (target_today + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -294,22 +306,32 @@ if run_btn:
             
         progress_bar.empty()
         
-        # 組合 Sheet1 (多) 與 Sheet2 (空)
         df_sheet1, bullish_stocks = format_sheet_data(A_put, B_put, f_ranks, t_ranks, name_to_ind)
         df_sheet2, _ = format_sheet_data(A_call, B_call, f_ranks, t_ranks, name_to_ind)
 
-    # --- 呈現多空清單表格 ---
     st.header(f"📋 今日個股多空清單 ({today_date})")
     
+    # 透過 column_config 把前台的抬頭覆寫成統一名稱 (避開後端不能同名的限制)
+    display_config = {
+        "外資(維持)": st.column_config.Column("外資排行"),
+        "投信(維持)": st.column_config.Column("投信排行"),
+        "外資(新)": st.column_config.Column("外資排行"),
+        "投信(新)": st.column_config.Column("投信排行"),
+        "外資(離)": st.column_config.Column("外資排行"),
+        "投信(離)": st.column_config.Column("投信排行")
+    }
+
     tab1, tab2 = st.tabs(["🟢 多頭個股清單", "🔴 空頭個股清單"])
+    
     with tab1:
-        st.dataframe(df_sheet1, use_container_width=True, hide_index=True)
+        styled_df1 = style_dataframe(df_sheet1)
+        st.dataframe(styled_df1, use_container_width=True, hide_index=True, column_config=display_config, height=600)
     with tab2:
-        st.dataframe(df_sheet2, use_container_width=True, hide_index=True)
+        styled_df2 = style_dataframe(df_sheet2)
+        st.dataframe(styled_df2, use_container_width=True, hide_index=True, column_config=display_config, height=600)
 
     st.divider()
 
-    # --- 呈現多頭分價量動態圖表 ---
     st.header("📊 多頭個股 64 日分價量分析")
     st.caption("僅計算「維持」與「新進」的多頭個股。點擊各股名稱展開圖表。")
     
@@ -325,7 +347,14 @@ if run_btn:
             with st.expander(f"🔹 {stock_name} ({tkr}) - 分價量圖表"):
                 df_vol = analyze_volume(tkr, v_start, v_end)
                 if df_vol is not None and not df_vol.empty:
-                    st.bar_chart(df_vol, height=300)
+                    # 使用 Altair 繪製橫向直條圖，並依照價格區間 (start) 降冪排序，實現高價在上方
+                    chart = alt.Chart(df_vol).mark_bar(orient='horizontal').encode(
+                        x=alt.X('vol:Q', title='累積成交量 (股)'),
+                        y=alt.Y('label:N', title='價格區間 (TWD)', sort=alt.SortField(field='start', order='descending')),
+                        tooltip=['label', 'vol']
+                    ).properties(height=350)
+                    
+                    st.altair_chart(chart, use_container_width=True)
                 else:
                     st.write("查無有效的分價量資料。")
     else:
