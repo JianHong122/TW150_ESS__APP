@@ -24,19 +24,15 @@ def get_trading_days(target_date_str=None):
     """
     try:
         if not target_date_str:
-            # 沒指定日期，直接抓最近 15 天的資料來取最後三天
             benchmark = yf.Ticker("0050.TW").history(period="15d")
             valid_dates = benchmark.index.tz_localize(None)
         else:
-            # 有指定日期，往前抓取約一個半月的資料來確保能篩選出三天
             target_dt = datetime.strptime(target_date_str, "%Y/%m/%d")
             start_dt = target_dt - timedelta(days=45)
-            end_dt = target_dt + timedelta(days=1) # yfinance 的 end 是不包含的，所以加一天
+            end_dt = target_dt + timedelta(days=1) 
             
             benchmark = yf.Ticker("0050.TW").history(start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
             all_dates = benchmark.index.tz_localize(None)
-            
-            # 過濾出小於等於目標日期的交易日
             valid_dates = all_dates[all_dates <= target_dt]
 
         if len(valid_dates) < 3:
@@ -202,16 +198,24 @@ def style_dataframe(df):
         
     return df.style.apply(highlight_cells, axis=1)
 
-def analyze_volume(ticker, start_date, end_date):
-    """計算單一個股的 64 日分價量資料，並回傳現價與標記當前價格區間"""
+def analyze_volume(ticker, start_date, end_date, target_date_str):
+    """計算單一個股的 64 日分價量資料，並精準鎖定 target_date_str 當日的收盤價做為現價"""
     try:
         hist = yf.Ticker(f"{ticker}.TW").history(start=start_date, end=end_date)
         if hist.empty:
             hist = yf.Ticker(f"{ticker}.TWO").history(start=start_date, end=end_date)
         if hist.empty or len(hist) < 64: return None
         
+        hist['DateStr'] = hist.index.tz_localize(None).strftime('%Y%m%d')
         hist_64 = hist.tail(64).copy()
-        current_price = hist_64['Close'].iloc[-1]
+        
+        # 精準取得查詢日當天的收盤價
+        target_row = hist_64[hist_64['DateStr'] == target_date_str]
+        if not target_row.empty:
+            current_price = target_row['Close'].iloc[0]
+        else:
+            # 防呆：如果因為某些極端原因當天沒資料，退回取歷史最後一筆
+            current_price = hist_64['Close'].iloc[-1]
         
         max_p = hist_64['High'].max()
         min_p = hist_64['Low'].min()
@@ -274,13 +278,11 @@ def analyze_volume(ticker, start_date, end_date):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TW50100_PATH = os.path.join(BASE_DIR, "TW50100.xlsx")
 
-# 抓取預設的最新交易日來填入輸入框
 default_c, default_b, default_a = get_trading_days()
 default_date_str = ""
 if default_a:
     default_date_str = datetime.strptime(default_a, "%Y%m%d").strftime("%Y/%m/%d")
 
-# 新增文字輸入欄位
 col_input, col_btn = st.columns([2, 1], vertical_alignment="bottom")
 with col_input:
     input_date = st.text_input("輸入查詢日期 (格式: YYYY/MM/DD)，留白則使用最新交易日", value=default_date_str)
@@ -292,13 +294,11 @@ if run_btn:
         st.error(f"⚠️ 找不到 {TW50100_PATH}！請確保該檔案已上傳至 GitHub 專案中。")
         st.stop()
         
-    # --- 防呆處理與日期判定 ---
     target_date = input_date.strip()
     if not target_date:
         target_date = default_date_str
     else:
         try:
-            # 檢查輸入的格式是否正確
             datetime.strptime(target_date, "%Y/%m/%d")
         except ValueError:
             st.error("⚠️ 日期格式錯誤！請依照「西元年/月/日」格式輸入，例如：2026/07/09")
@@ -307,14 +307,12 @@ if run_btn:
     st.divider()
 
     with st.spinner(f"正在尋找 {target_date} 附近的交易日與抓取資料..."):
-        # 取得目標日期的 C(前天), B(昨天), A(今天)
         date_c, date_b, date_a = get_trading_days(target_date)
         
         if date_a is None:
             st.error("❌ 無法取得該日期附近的交易資料，請嘗試更換日期。")
             st.stop()
             
-        # 檢查取得的 A 日期是否與使用者輸入的日期不同 (代表假日或無開盤)
         actual_date_a = datetime.strptime(date_a, "%Y%m%d").strftime("%Y/%m/%d")
         if actual_date_a != target_date:
             st.info(f"💡 提示：{target_date} 查無收盤資料，已自動往前推進至最近交易日：{actual_date_a}")
@@ -484,7 +482,8 @@ if run_btn:
             tkr = name_to_ticker.get(stock_name)
             if not tkr: continue
             
-            result = analyze_volume(tkr, v_start, v_end)
+            # 將 date_a 傳入 analyze_volume 進行精準匹配
+            result = analyze_volume(tkr, v_start, v_end, date_a)
             if result is not None:
                 df_vol, current_price = result
                 with st.expander(f"🔹 {stock_name} ({tkr}) - 分價量圖表 / 現價 : {current_price:.2f}"):
