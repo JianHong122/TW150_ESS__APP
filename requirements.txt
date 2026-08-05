@@ -3,3 +3,4 @@ pandas
 requests
 yfinance
 openpyxl
+starlette<0.37.0
